@@ -19,10 +19,10 @@ from decimal import Decimal
 from pyignite.api import (
     hashcode, sql_fields, cache_create, scan, cache_create_with_config,
     cache_get_configuration, put_binary_type, get_binary_type,
-    cache_put, cache_destroy,
+    cache_get, cache_put, cache_destroy,
 )
 from pyignite.datatypes import (
-    BinaryObject, BoolObject, IntObject, DecimalObject, String,
+    BinaryObject, BoolObject, IntObject, DecimalObject, LongObject, String,
 )
 from pyignite.datatypes.prop_codes import *
 from pyignite.utils import unwrap_binary
@@ -198,7 +198,7 @@ def test_sql_write_as_binary(conn):
     # recheck
     result = get_binary_type(conn, sql_type_id)
     assert result.status == 0, result.message
-    assert schema_id == result.value['schema'][0]['schema_id'], (
+    assert schema_id in result.value['schema'], (
         'Client-side schema ID calculation is incorrect'
     )
 
@@ -244,3 +244,139 @@ def test_sql_write_as_binary(conn):
 
     result = cache_destroy(conn, scheme_hash_code)
     assert result.status == 0, result.message
+
+
+def test_nested_binary_objects(conn):
+
+    cache_create(conn, 'nested_binary')
+
+    inner_schema = OrderedDict([
+        ('inner_int', LongObject),
+        ('inner_str', String),
+    ])
+
+    outer_schema = OrderedDict([
+        ('outer_int', LongObject),
+        ('nested_binary', BinaryObject),
+        ('outer_str', String),
+    ])
+
+    result = put_binary_type(conn, 'InnerType', schema=inner_schema)
+    inner_type_id = result.value['type_id']
+    inner_schema_id = result.value['schema_id']
+
+    result = put_binary_type(conn, 'OuterType', schema=outer_schema)
+    outer_type_id = result.value['type_id']
+    outer_schema_id = result.value['schema_id']
+
+    result = cache_put(
+        conn,
+        hashcode('nested_binary'),
+        1,
+        {
+            'version': 1,
+            'type_id': outer_type_id,
+            'schema_id': outer_schema_id,
+            'fields': OrderedDict([
+                ('outer_int', 42),
+                ('nested_binary', (
+                    {
+                        'version': 1,
+                        'type_id': inner_type_id,
+                        'schema_id': inner_schema_id,
+                        'fields': OrderedDict([
+                            ('inner_int', 24),
+                            ('inner_str', 'World'),
+                        ]),
+                    }, BinaryObject)),
+                ('outer_str', 'Hello'),
+            ])
+        },
+        value_hint=BinaryObject,
+    )
+    assert result.status == 0, result.message
+
+    result = cache_get(conn, hashcode('nested_binary'), 1)
+    assert result.status == 0, result.message
+
+    data = unwrap_binary(conn, result.value, recurse=False)['fields']
+    assert data['outer_str'] == 'Hello'
+    assert data['outer_int'] == 42
+
+    inner_data = data['nested_binary']['fields']
+    assert inner_data['inner_str'] == 'World'
+    assert inner_data['inner_int'] == 24
+
+    cache_destroy(conn, hashcode('nested_binary'))
+
+
+def test_add_schema_to_binary_object(conn):
+
+    cache_create(conn, 'migrate_binary')
+
+    original_schema = OrderedDict([
+        ('test_str', String),
+        ('test_int', LongObject),
+        ('test_bool', BoolObject),
+    ])
+    result = put_binary_type(conn, 'MyBinaryType', schema=original_schema)
+    assert result.status == 0, result.message
+    type_id = result.value['type_id']
+    original_schema_id = result.value['schema_id']
+
+    result = cache_put(
+        conn,
+        hashcode('migrate_binary'),
+        1,
+        {
+            'version': 1,
+            'type_id': type_id,
+            'schema_id': original_schema_id,
+            'fields': OrderedDict([
+                ('test_str', 'Hello World'),
+                ('test_int', 42),
+                ('test_bool', True),
+            ]),
+        },
+        value_hint=BinaryObject,
+    )
+    assert result.status == 0, result.message
+
+    modified_schema = original_schema.copy()
+    modified_schema['test_decimal'] = DecimalObject
+    del modified_schema['test_bool']
+
+    result = put_binary_type(conn, 'MyBinaryType', schema=modified_schema)
+    assert result.status == 0, result.message
+    modified_schema_id = result.value['schema_id']
+    assert result.value['type_id'] == type_id
+
+    assert original_schema_id != modified_schema_id
+
+    result = cache_put(
+        conn,
+        hashcode('migrate_binary'),
+        2,
+        {
+            'version': 1,
+            'type_id': type_id,
+            'schema_id': modified_schema_id,
+            'fields': OrderedDict([
+                ('test_str', 'Hello World'),
+                ('test_int', 42),
+                ('test_decimal', Decimal('3.45')),
+            ]),
+        },
+        value_hint=BinaryObject,
+    )
+    assert result.status == 0, result.message
+
+    result = cache_get(conn, hashcode('migrate_binary'), 2)
+    assert result.status == 0, result.message
+    data = unwrap_binary(conn, result.value)['fields']
+    assert len(data) == 3
+    assert 'test_str' in data
+    assert 'test_decimal' in data
+    assert 'test_bool' not in data
+
+    cache_destroy(conn, hashcode('migrate_binary'))
