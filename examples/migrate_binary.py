@@ -18,7 +18,7 @@ from datetime import date
 from decimal import Decimal
 
 from pyignite.api import (
-    hashcode, get_binary_type, put_binary_type, cache_get_or_create, cache_put,
+    get_binary_type, put_binary_type, cache_get_or_create, cache_put,
     scan, scan_cursor_get_page, cache_get,
 )
 from pyignite.connection import Connection
@@ -120,7 +120,7 @@ old_schema_id = result.value['schema_id']
 for key, value in old_data:
     cache_put(
         conn,
-        hashcode('accounting'),
+        'accounting',
         key,
         {
             'version': 1,
@@ -131,9 +131,7 @@ for key, value in old_data:
         value_hint=BinaryObject,
     )
 
-type_id = hashcode('ExpenseVoucher'.lower())
-
-result = get_binary_type(conn, type_id)
+result = get_binary_type(conn, 'ExpenseVoucher')
 print(result.value)
 
 # {
@@ -244,7 +242,7 @@ def migrate(data):
         # replace data
         cache_put(
             conn,
-            hashcode('accounting'),
+            'accounting',
             key,
             {
                 'version': 1,
@@ -256,7 +254,7 @@ def migrate(data):
         )
 
         # verify data
-        verify = cache_get(conn, hashcode('accounting'), key)
+        verify = cache_get(conn, 'accounting', key)
         print(dict(unwrap_binary(conn, verify.value)['fields']))
 
         # {
@@ -270,7 +268,7 @@ def migrate(data):
 
 
 # migrate data
-result = scan(conn, hashcode('accounting'), 2)
+result = scan(conn, 'accounting', 2)
 migrate(result.value['data'])
 
 cursor = result.value['cursor']

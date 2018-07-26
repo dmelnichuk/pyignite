@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from pyignite.api import (
-    hashcode, cache_get, cache_put, cache_get_or_create_with_config,
+    cache_get, cache_put, cache_get_or_create_with_config,
 )
 from pyignite.connection import Connection
 from pyignite.datatypes.cache_config import CacheMode
@@ -22,7 +22,6 @@ from pyignite.datatypes.prop_codes import *
 
 
 MAX_ERRORS = 20
-CACHE_NAME = 'failover_test'
 nodes = [
     ('127.0.0.1', 10800),
     ('127.0.0.1', 10801),
@@ -40,13 +39,13 @@ while True:
         while True:
             # proceed with initializing or modifying data
             cache_get_or_create_with_config(conn, {
-                PROP_NAME: CACHE_NAME,
+                PROP_NAME: 'failover_test',
                 PROP_CACHE_MODE: CacheMode.REPLICATED,
             })
-            result = cache_get(conn, hashcode(CACHE_NAME), 'test_value')
+            result = cache_get(conn, 'failover_test', 'test_value')
             cache_put(
                 conn,
-                hashcode(CACHE_NAME),
+                'failover_test',
                 'test_value',
                 result.value + 1 if result.value else 1
             )
