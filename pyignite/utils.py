@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Union
+from typing import Any, Type, Union
 
 
 def is_iterable(value):
@@ -36,6 +36,15 @@ def is_hinted(value):
     )
 
 
+def is_wrapped(value: Any) -> bool:
+    return (
+        type(value) is tuple
+        and len(value) == 2
+        and type(value[0]) is bytes
+        and type(value[1]) is int
+    )
+
+
 def int_overflow(value: int) -> int:
     """
     Simulates 32bit integer overflow.
@@ -50,7 +59,7 @@ def unwrap_binary(conn, wrapped: tuple, recurse: bool=True):
     :param conn: connection to Ignite cluster,
     :param wrapped: `WrappedDataObject` value,
     :param recurse: unwrap recursively using a simple heuristic to detect
-     nested `WrappedDataObject`s,
+     nested `WrappedDataObject`\ s,
     :return: dict representing wrapped BinaryObject.
     """
     from pyignite.datatypes import BinaryObject
@@ -63,12 +72,7 @@ def unwrap_binary(conn, wrapped: tuple, recurse: bool=True):
 
     if recurse:
         for key, value in result['fields'].items():
-            if (
-                type(value) is tuple
-                and len(value) == 2
-                and type(value[0]) is bytes
-                and type(value[1]) is int
-            ):
+            if is_wrapped(value):
                 result[key] = unwrap_binary(conn, value, recurse)
 
     return result
@@ -109,3 +113,21 @@ def entity_id(cache: Union[str, int]) -> int:
     :return: entity ID.
     """
     return cache if type(cache) is int else hashcode(cache.lower())
+
+
+def status_to_exception(exc: Type[Exception]):
+    """
+    Converts erroneous status code with error message to an exception
+    of the given class.
+
+    :param exc: the class of exception to raise,
+    :return: decorator.
+    """
+    def ste_decorator(fn):
+        def ste_wrapper(*args, **kwargs):
+            result = fn(*args, **kwargs)
+            if result.status != 0:
+                raise exc(result.message)
+            return result.value
+        return ste_wrapper
+    return ste_decorator

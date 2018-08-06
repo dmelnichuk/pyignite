@@ -14,11 +14,15 @@
 # limitations under the License.
 
 import socket
-import ssl
+from typing import Iterable, Union
 
 from pyignite.constants import *
-from pyignite.exceptions import ParameterError, SocketError, SocketWriteError
+from pyignite.exceptions import (
+    BinaryTypeError, ParameterError, SocketError, SocketWriteError, SQLError,
+)
+from pyignite.utils import status_to_exception
 from .handshake import HandshakeRequest, read_response
+from .ssl import wrap
 
 
 __all__ = ['Connection', 'PrefetchConnection']
@@ -26,11 +30,19 @@ __all__ = ['Connection', 'PrefetchConnection']
 
 class Connection:
     """
-    Socket wrapper. Detects fragmentation and network errors.
+    This class represents a connection to Ignite node. It serves multiple
+    purposes:
 
-    https://docs.python.org/3/howto/sockets.html
+     * socket wrapper. Detects fragmentation and network errors. See also
+       https://docs.python.org/3/howto/sockets.html,
+     * binary protocol connector. Incapsulates handshake and failover
+       connection,
+     * cache factory. Cache objects are used for key-value operations,
+     * Ignite SQL endpoint,
+     * binary types registration endpoint.
     """
 
+    nodes = None
     socket = None
     host = None
     port = None
@@ -92,33 +104,11 @@ class Connection:
         self.init_kwargs = kwargs
 
     read_response = read_response
+    _wrap = wrap
 
-    def _wrap(self, _socket):
-        """ Wrap socket in SSL wrapper. """
-        if self.init_kwargs.get('use_ssl', None):
-            _socket = ssl.wrap_socket(
-                _socket,
-                ssl_version=self.init_kwargs.get(
-                    'ssl_version', SSL_DEFAULT_VERSION
-                ),
-                ciphers=self.init_kwargs.get(
-                    'ssl_ciphers', SSL_DEFAULT_CIPHERS
-                ),
-                cert_reqs=self.init_kwargs.get(
-                    'ssl_cert_reqs', ssl.CERT_NONE
-                ),
-                keyfile=self.init_kwargs.get('ssl_keyfile', None),
-                certfile=self.init_kwargs.get('ssl_certfile', None),
-                ca_certs=self.init_kwargs.get('ssl_ca_certfile', None),
-            )
-        return _socket
-
-    def connect(self, host: str, port: int):
+    def _connect(self, host: str, port: int):
         """
-        Connect to the server.
-
-        :param host: Ignite server host,
-        :param port: Ignite server port.
+        Actually connect socket.
         """
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.settimeout(self.timeout)
@@ -132,8 +122,8 @@ class Connection:
             self.close()
             raise SocketError(
                 (
-                    'Ignite protocol version mismatch: requested {}.{}.{}, '
-                    'received {}.{}.{}.'
+                    'Ignite protocol version mismatch: '
+                    'requested {}.{}.{}, received {}.{}.{}.'
                 ).format(
                     PROTOCOL_VERSION_MAJOR,
                     PROTOCOL_VERSION_MINOR,
@@ -145,6 +135,16 @@ class Connection:
             )
         self.host, self.port = host, port
 
+    def connect(self, host: str, port: int):
+        """
+        Connect to the server.
+
+        :param host: Ignite server host,
+        :param port: Ignite server port.
+
+        """
+        self._connect(host, port)
+
     def clone(self) -> object:
         """
         Clones this connection in its current state.
@@ -152,8 +152,9 @@ class Connection:
         :return: `Connection` object.
         """
         clone = Connection(**self.init_kwargs)
+        clone.nodes = self.nodes
         if self.port and self.host:
-            clone.connect(self.host, self.port)
+            clone._connect(self.host, self.port)
         return clone
 
     def make_buffered(self, buffer: bytes) -> object:
@@ -165,8 +166,9 @@ class Connection:
         :return: `BufferedConnection` object.
         """
         conn = BufferedConnection(buffer, **self.init_kwargs)
+        conn.nodes = self.nodes
         if self.port and self.host:
-            conn.connect(self.host, self.port)
+            conn._connect(self.host, self.port)
         return conn
 
     def send(self, data: bytes, flags=None):
@@ -213,6 +215,144 @@ class Connection:
 
         return b''.join(chunks)
 
+    @status_to_exception(BinaryTypeError)
+    def get_binary_type(self, binary_type: Union[str, int]) -> dict:
+        """
+        Gets the binary type information by type ID.
+
+        :param binary_type: binary type name or ID,
+        :return: binary type description with type ID and schemas.
+        """
+        from pyignite.api.binary import get_binary_type
+
+        return get_binary_type(self, binary_type)
+
+    @status_to_exception(BinaryTypeError)
+    def put_binary_type(
+        self, type_name: str, affinity_key_field: str=None,
+        is_enum=False, schema: dict=None
+    ):
+        """
+        Registers binary type information in cluster.
+
+        :param type_name: name of the data type being registered,
+        :param affinity_key_field: (optional) name of the affinity key field,
+        :param is_enum: (optional) register enum if True, binary object
+         otherwise. Defaults to False,
+        :param schema: (optional) when register enum, pass a dict
+         of enumerated parameter names as keys and an integers as values.
+         When register binary type, pass a dict of field names: field types.
+         Binary type with no fields is OK.
+        """
+        from pyignite.api.binary import put_binary_type
+
+        return put_binary_type(
+            self, type_name, affinity_key_field, is_enum, schema
+        )
+
+    def create_cache(self, settings: Union[str, dict]) -> object:
+        """
+        Creates Ignite cache by name. Raises `CacheError` if such a cache is
+        already exists.
+
+        :param settings: cache name or cache properties,
+        :return: Cache object.
+        """
+        from pyignite.api.cache import Cache
+
+        return Cache(self, settings)
+
+    def get_or_create_cache(self, settings: Union[str, dict]) -> object:
+        """
+        Creates Ignite cache, if not exist.
+
+        :param settings: cache name or cache properties,
+        :return: Cache object.
+        """
+        from pyignite.api.cache import Cache
+
+        return Cache(self, settings, with_get=True)
+
+    def sql(
+        self, query_str: str, page_size: int=1, query_args: Iterable=None,
+        schema: Union[int, str]='PUBLIC',
+        statement_type: int=0, distributed_joins: bool=False,
+        local: bool=False, replicated_only: bool=False,
+        enforce_join_order: bool=False, collocated: bool=False,
+        lazy: bool=False, include_field_names: bool=False,
+        max_rows: int=-1, timeout: int=0,
+    ):
+        """
+        Runs an SQL query and returns its result.
+
+        :param query_str: SQL query string,
+        :param page_size: cursor page size,
+        :param query_args: (optional) query arguments. List of values or
+         (value, type hint) tuples,
+        :param schema: (optional) schema for the query. Defaults to `PUBLIC`,
+        :param statement_type: (optional) statement type. Can be:
+
+         * StatementType.ALL − any type (default),
+         * StatementType.SELECT − select,
+         * StatementType.UPDATE − update.
+
+        :param distributed_joins: (optional) distributed joins. Defaults
+         to False,
+        :param local: (optional) pass True if this query should be executed
+         on local node only. Defaults to False,
+        :param replicated_only: (optional) whether query contains only
+         replicated tables or not. Defaults to False,
+        :param enforce_join_order: (optional) enforce join order. Defaults
+         to False,
+        :param collocated: (optional) whether your data is co-located or not.
+         Defaults to False,
+        :param lazy: (optional) lazy query execution. Defaults to False,
+        :param include_field_names: (optional) include field names in result.
+         Defaults to False,
+        :param max_rows: (optional) query-wide maximum of rows. Defaults to -1
+         (all rows),
+        :param timeout: (optional) non-negative timeout value in ms.
+         Zero disables timeout (default),
+        :return: generator with result rows as a lists. If
+         `include_field_names` was set, the first row will hold field names.
+        """
+        from pyignite.api.sql import sql_fields, sql_fields_cursor_get_page
+
+        def generate_result(value):
+            cursor = value['cursor']
+            more = value['more']
+
+            if include_field_names:
+                yield value['fields']
+                field_count = len(value['fields'])
+            else:
+                field_count = value['field_count']
+            for line in value['data']:
+                yield line
+
+            while more:
+                inner_result = sql_fields_cursor_get_page(
+                    self, cursor, field_count
+                )
+                if inner_result.status != 0:
+                    raise SQLError(result.message)
+                more = inner_result.value['more']
+                for line in inner_result.value['data']:
+                    yield line
+
+        schema = self.get_or_create_cache(schema)
+        result = sql_fields(
+            self, schema.cache_id, query_str,
+            page_size, query_args, schema.name,
+            statement_type, distributed_joins, local, replicated_only,
+            enforce_join_order, collocated, lazy, include_field_names,
+            max_rows, timeout,
+        )
+        if result.status != 0:
+            raise SQLError(result.message)
+
+        return generate_result(result.value)
+
     def close(self):
         """
         Mark socket closed. This is recommended but not required, since
@@ -235,7 +375,7 @@ class BufferedConnection(Connection):
         self.init_kwargs = kwargs
         self.pos = 0
 
-    def connect(self, host: str, port: int):
+    def _connect(self, host: str, port: int):
         self.host, self.port = host, port
 
     def close(self):

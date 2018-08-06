@@ -13,4 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pyignite.connection import Connection
+import ssl
+
+from pyignite.constants import *
+
+
+def wrap(conn, _socket):
+    """ Wrap socket in SSL wrapper. """
+    if conn.init_kwargs.get('use_ssl', None):
+        _socket = ssl.wrap_socket(
+            _socket,
+            ssl_version=conn.init_kwargs.get(
+                'ssl_version', SSL_DEFAULT_VERSION
+            ),
+            ciphers=conn.init_kwargs.get(
+                'ssl_ciphers', SSL_DEFAULT_CIPHERS
+            ),
+            cert_reqs=conn.init_kwargs.get(
+                'ssl_cert_reqs', ssl.CERT_NONE
+            ),
+            keyfile=conn.init_kwargs.get('ssl_keyfile', None),
+            certfile=conn.init_kwargs.get('ssl_certfile', None),
+            ca_certs=conn.init_kwargs.get('ssl_ca_certfile', None),
+        )
+    return _socket

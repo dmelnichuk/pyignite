@@ -28,3 +28,19 @@ class SocketWriteError(SocketError):
 
 class ParameterError(Exception):
     pass
+
+
+class CacheError(Exception):
+    pass
+
+
+class BinaryTypeError(CacheError):
+    pass
+
+
+class CacheCreationError(CacheError):
+    pass
+
+
+class SQLError(CacheError):
+    pass
