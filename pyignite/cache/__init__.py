@@ -15,7 +15,7 @@
 
 from typing import Any, Iterable, Optional, Union
 
-from pyignite.connection import Connection
+from pyignite.client import Client
 from pyignite.datatypes import prop_codes
 from pyignite.exceptions import (
     CacheCreationError, CacheError, ParameterError, SQLError,
@@ -23,12 +23,12 @@ from pyignite.exceptions import (
 from pyignite.utils import (
     cache_id, is_wrapped, status_to_exception, unwrap_binary,
 )
-from .cache_config import (
+from pyignite.api.cache_config import (
     cache_create, cache_create_with_config,
     cache_get_or_create, cache_get_or_create_with_config,
     cache_destroy, cache_get_configuration,
 )
-from .key_value import (
+from pyignite.api.key_value import (
     cache_get, cache_put, cache_get_all, cache_put_all, cache_replace,
     cache_clear, cache_clear_key, cache_clear_keys,
     cache_contains_key, cache_contains_keys,
@@ -37,7 +37,9 @@ from .key_value import (
     cache_remove_key, cache_remove_keys, cache_remove_all,
     cache_remove_if_equals, cache_replace_if_equals, cache_get_size,
 )
-from .sql import scan, scan_cursor_get_page, sql, sql_cursor_get_page
+from pyignite.api.sql import (
+    scan, scan_cursor_get_page, sql, sql_cursor_get_page,
+)
 
 
 PROP_CODES = set([
@@ -60,7 +62,7 @@ CACHE_CREATE_FUNCS = {
 class Cache:
     """
     Ignite cache abstraction. Can be obtained by calling
-    `Connection.create_cache` or `Connection.get_or_create_cache` methods.
+    `Client.create_cache` or `Client.get_or_create_cache` methods.
     """
     _cache_id = None
     _name = None
@@ -83,22 +85,22 @@ class Cache:
             raise ParameterError('One or more settings was not recognized')
 
     def __init__(
-        self, conn: Connection, settings: Union[str, dict]=None,
+        self, client: Client, settings: Union[str, dict]=None,
         with_get: bool=False
     ):
         """
         Initialize cache object. Normally you should not calling this directly.
-        `Connection.create_cache` or `Connection.get_or_create_cache` methods
+        `Client.create_cache` or `Client.get_or_create_cache` methods
         will do it for you.
 
-        :param conn: Connection to Ignite server,
+        :param client: Ignite client,
         :param settings: cache settings. Can be a string (cache name) or a dict
          of cache properties and their values. In this case PROP_NAME is
          mandatory,
         :param with_get: (optional) do not raise exception, if the cache
          is already exists. Defaults to False.
         """
-        self._conn = conn
+        self._conn = client
         self.validate_settings(settings)
         if type(settings) == str:
             self._name = settings
@@ -106,7 +108,7 @@ class Cache:
             self._name = settings[prop_codes.PROP_NAME]
 
         func = CACHE_CREATE_FUNCS[type(settings) is dict][with_get]
-        result = func(conn, settings)
+        result = func(client, settings)
         if result.status != 0:
             raise CacheCreationError(result.message)
 
@@ -138,11 +140,11 @@ class Cache:
         return self._name
 
     @property
-    def conn(self) -> Connection:
+    def client(self) -> Client:
         """
-        Connection.
+        Ignite Client object.
 
-        :return: Connection object, through which the cache is accessed.
+        :return: Client object, through which the cache is accessed.
         """
         return self._conn
 
@@ -155,7 +157,7 @@ class Cache:
         """
         return self._cache_id
 
-    def process_binary(self, value: Any) -> Any:
+    def _process_binary(self, value: Any) -> Any:
         """
         Detects and recursively unwraps Binary Object.
 
@@ -185,7 +187,7 @@ class Cache:
         :return: value retrieved.
         """
         result = cache_get(self._conn, self._cache_id, key, key_hint=key_hint)
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -217,7 +219,7 @@ class Cache:
         result = cache_get_all(self._conn, self._cache_id, keys)
         if result.value:
             for key, value in result.value.items():
-                result.value[key] = self.process_binary(value)
+                result.value[key] = self._process_binary(value)
         return result
 
     @status_to_exception(CacheError)
@@ -250,7 +252,7 @@ class Cache:
             self._conn, self._cache_id, key, value,
             key_hint=key_hint, value_hint=value_hint
         )
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -320,7 +322,7 @@ class Cache:
         result = cache_get_and_put(
             self._conn, self._cache_id, key, value, key_hint, value_hint
         )
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -342,7 +344,7 @@ class Cache:
         result = cache_get_and_put_if_absent(
             self._conn, self._cache_id, key, value, key_hint, value_hint
         )
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -375,7 +377,7 @@ class Cache:
         result = cache_get_and_remove(
             self._conn, self._cache_id, key, key_hint
         )
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -398,7 +400,7 @@ class Cache:
         result = cache_get_and_replace(
             self._conn, self._cache_id, key, value, key_hint, value_hint
         )
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -467,7 +469,7 @@ class Cache:
             self._conn, self._cache_id, key, sample, value,
             key_hint, sample_hint, value_hint
         )
-        result.value = self.process_binary(result.value)
+        result.value = self._process_binary(result.value)
         return result
 
     @status_to_exception(CacheError)
@@ -501,8 +503,8 @@ class Cache:
 
         cursor = result.value['cursor']
         for k, v in result.value['data'].items():
-            k = self.process_binary(k)
-            v = self.process_binary(v)
+            k = self._process_binary(k)
+            v = self._process_binary(v)
             yield k, v
 
         while result.value['more']:
@@ -511,8 +513,8 @@ class Cache:
                 raise CacheError(result.message)
 
             for k, v in result.value['data'].items():
-                k = self.process_binary(k)
-                v = self.process_binary(v)
+                k = self._process_binary(k)
+                v = self._process_binary(v)
                 yield k, v
 
     def sql(
@@ -541,8 +543,8 @@ class Cache:
             cursor = value['cursor']
             more = value['more']
             for k, v in value['data'].items():
-                k = self.process_binary(k)
-                v = self.process_binary(v)
+                k = self._process_binary(k)
+                v = self._process_binary(v)
                 yield k, v
 
             while more:
@@ -551,8 +553,8 @@ class Cache:
                     raise SQLError(result.message)
                 more = inner_result.value['more']
                 for k, v in inner_result.value['data'].items():
-                    k = self.process_binary(k)
-                    v = self.process_binary(v)
+                    k = self._process_binary(k)
+                    v = self._process_binary(v)
                     yield k, v
 
         type_name = self.settings[

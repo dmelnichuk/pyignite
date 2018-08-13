@@ -13,31 +13,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+This module contains `Client` class, that lets you communicate with Apache
+Ignite cluster node by the means of Ignite binary client protocol.
+
+To start the communication, you may connect to the node of their choice
+by instantiating the `Client` object and calling `Client.connect()` method
+with proper parameters. Client wraps TCP socket handling, as well as
+Ignite protocol handshaking.
+
+The whole storage room of Ignite cluster is split up onto named structures,
+called caches. For accessing the particular cache in key-value style
+(a-la Redis or memcached) you should first create the `Cache` object
+by calling `Client.create_cache()` or `Client.get_or_create_cache()` methods,
+than call `Cache` methods.
+
+For using Ignite SQL call `Client.sql()` method. This method returns
+a generator with result rows.
+
+`Client.get_binary_type()` and `Client.put_binary_type()` methods represent
+the registry for Ignite Complex Objects.
+"""
+
 import socket
 from typing import Iterable, Union
 
 from pyignite.constants import *
 from pyignite.exceptions import (
-    BinaryTypeError, CacheError, ParameterError, SocketError, SocketWriteError,
-    SQLError,
+    BinaryTypeError, CacheError, ParameterError, ReconnectError,
+    SocketError, SocketWriteError, SQLError,
 )
-from pyignite.utils import status_to_exception
+from pyignite.utils import is_iterable, status_to_exception
 from .handshake import HandshakeRequest, read_response
 from .ssl import wrap
 
 
-__all__ = ['Connection', 'PrefetchConnection']
+__all__ = ['Client']
 
 
-class Connection:
+class Client:
     """
-    This class represents a connection to Ignite node. It serves multiple
-    purposes:
+    This is a main `pyignite` class, that represents a connection to Ignite
+    node. It serves multiple purposes:
 
      * socket wrapper. Detects fragmentation and network errors. See also
        https://docs.python.org/3/howto/sockets.html,
-     * binary protocol connector. Incapsulates handshake and failover
-       connection,
+     * binary protocol connector. Incapsulates handshake, data read-ahead and
+       failover reconnection,
      * cache factory. Cache objects are used for key-value operations,
      * Ignite SQL endpoint,
      * binary types registration endpoint.
@@ -48,6 +70,7 @@ class Connection:
     host = None
     port = None
     timeout = None
+    prefetch = None
 
     @staticmethod
     def check_kwargs(kwargs):
@@ -64,17 +87,18 @@ class Connection:
         for kw in kwargs:
             if kw not in expected_args:
                 raise ParameterError((
-                    'Unexpected parameter for connection '
-                    'initialization: `{}`'
+                    'Unexpected parameter for client initialization: `{}`'
                 ).format(kw))
 
-    def __init__(self, **kwargs):
+    def __init__(self, prefetch: bytes=b'', **kwargs):
         """
-        Initialize connection.
+        Initialize client.
 
-        For the use of the last two parameters see
+        For the use of the SSL-related parameters see
         https://docs.python.org/3/library/ssl.html#ssl-certificates.
 
+        :param prefetch: (optional) initialize the read-ahead data buffer.
+         Empty by default,
         :param timeout: (optional) sets timeout (in seconds) for each socket
          operation including `connect`. 0 means non-blocking mode. Can accept
          integer or float value. Default is None (blocking mode),
@@ -100,12 +124,19 @@ class Connection:
          or a certificate chain. Required to check the validity of the remote
          (server-side) certificate.
         """
+        self.prefetch = prefetch
         self.check_kwargs(kwargs)
         self.timeout = kwargs.pop('timeout', None)
         self.init_kwargs = kwargs
 
     read_response = read_response
     _wrap = wrap
+
+    def __repr__(self) -> str:
+        if self.host and self.port:
+            return '{}:{}'.format(self.host, self.port)
+        else:
+            return '<not connected>'
 
     def _connect(self, host: str, port: int):
         """
@@ -136,41 +167,71 @@ class Connection:
             )
         self.host, self.port = host, port
 
-    def connect(self, host: str, port: int):
+    def connect(self, *args):
         """
-        Connect to the server.
+        Connect to the server. Connection parameters may be either one node
+        (host and port), or list (or other iterable) of nodes.
 
         :param host: Ignite server host,
-        :param port: Ignite server port.
-
+        :param port: Ignite server port,
+        :param nodes: iterable of (host, port) tuples.
         """
+        self.nodes = iter([])
+        if len(args) == 0:
+            host, port = IGNITE_DEFAULT_HOST, IGNITE_DEFAULT_PORT
+        elif len(args) == 1 and is_iterable(args[0]):
+            self.nodes = iter(args[0])
+            host, port = next(self.nodes)
+        elif (
+            len(args) == 2
+            and isinstance(args[0], str)
+            and isinstance(args[1], int)
+        ):
+            host, port = args
+        else:
+            raise ConnectionError('Connection parameters are not valid.')
+
         self._connect(host, port)
 
-    def clone(self) -> 'Connection':
+    def reconnect(self):
         """
-        Clones this connection in its current state.
+        Restore the connection using the next node in `nodes` iterable.
+        """
+        for host, port in self.nodes:
+            try:
+                self._connect(host, port)
+                return
+            except OSError:
+                pass
+        self.host = self.port = self.nodes = None
+        # exception chaining gives a misleading traceback here
+        raise ReconnectError('Can not reconnect: out of nodes') from None
 
-        :return: `Connection` object.
+    def clone(self) -> 'Client':
         """
-        clone = Connection(**self.init_kwargs)
+        Clones this client in its current state.
+
+        :return: `Client` object.
+        """
+        clone = Client(**self.init_kwargs)
         clone.nodes = self.nodes
         if self.port and self.host:
             clone._connect(self.host, self.port)
         return clone
 
-    def make_buffered(self, buffer: bytes) -> 'BufferedConnection':
+    def mock(self, buffer: bytes) -> 'MockClient':
         """
-        Creates a mock connection, but provide all the necessary parameters of
+        Creates a mock client, but provide all the necessary parameters of
         the real one.
 
         :param buffer: binary data,
-        :return: `BufferedConnection` object.
+        :return: `MockClient` object.
         """
-        conn = BufferedConnection(buffer, **self.init_kwargs)
-        conn.nodes = self.nodes
+        client = MockClient(buffer, **self.init_kwargs)
+        client.nodes = self.nodes
         if self.port and self.host:
-            conn._connect(self.host, self.port)
-        return conn
+            client._connect(self.host, self.port)
+        return client
 
     def send(self, data: bytes, flags=None):
         """
@@ -194,11 +255,26 @@ class Connection:
 
     def recv(self, buffersize, flags=None) -> bytes:
         """
-        Receive data from socket.
+        Receive data from socket or read-ahead buffer.
 
         :param buffersize: bytes to receive,
         :param flags: (optional) OS-specific flags,
         :return: data received.
+        """
+        pref_size = len(self.prefetch)
+        if buffersize > pref_size:
+            result = self.prefetch + self._recv(
+                buffersize-pref_size, flags)
+            self.prefetch = b''
+            return result
+        else:
+            result = self.prefetch[:buffersize]
+            self.prefetch = self.prefetch[buffersize:]
+            return result
+
+    def _recv(self, buffersize, flags=None) -> bytes:
+        """
+        Handle socket data reading.
         """
         kwargs = {}
         if flags is not None:
@@ -259,7 +335,7 @@ class Connection:
         :param settings: cache name or cache properties,
         :return: Cache object.
         """
-        from pyignite.api.cache import Cache
+        from pyignite.cache import Cache
 
         return Cache(self, settings)
 
@@ -270,7 +346,7 @@ class Connection:
         :param settings: cache name or cache properties,
         :return: Cache object.
         """
-        from pyignite.api.cache import Cache
+        from pyignite.cache import Cache
 
         return Cache(self, settings, with_get=True)
 
@@ -374,12 +450,12 @@ class Connection:
         self.socket = self.host = self.port = None
 
 
-class BufferedConnection(Connection):
+class MockClient(Client):
     """
     Mock socket reads. Allows deserializers to work with static buffers.
 
-    You most probably do not need to use this class directly.
-    Call `Connection.make_buffered()` instead.
+    You most probably do not need to use this class directly. Call
+    `Client.mock()` instead.
     """
 
     def __init__(self, buffer: bytes, **kwargs):
@@ -402,29 +478,3 @@ class BufferedConnection(Connection):
         received = self.buffer[self.pos:self.pos+buffersize]
         self.pos += buffersize
         return received
-
-
-class PrefetchConnection(Connection):
-    """
-    Use this socket wrapper, when you wish to “put back” some data you just
-    receive from the socket and then continue to use the socket as usual.
-    """
-    prefetch = None
-    conn = None
-
-    def __init__(self, conn: Connection, prefetch: bytes=b''):
-        super().__init__()
-        self.conn = conn
-        self.prefetch = prefetch
-
-    def recv(self, buffersize, flags=None):
-        pref_size = len(self.prefetch)
-        if buffersize > pref_size:
-            result = self.prefetch + self.conn.recv(
-                buffersize-pref_size, flags)
-            self.prefetch = b''
-            return result
-        else:
-            result = self.prefetch[:buffersize]
-            self.prefetch = self.prefetch[buffersize:]
-            return result
