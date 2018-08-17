@@ -40,8 +40,8 @@ from typing import Iterable, Union
 
 from pyignite.constants import *
 from pyignite.exceptions import (
-    BinaryTypeError, CacheError, ParameterError, ReconnectError,
-    SocketError, SocketWriteError, SQLError,
+    BinaryTypeError, CacheError, HandshakeError, ParameterError,
+    ReconnectError, SocketError, SocketWriteError, SQLError,
 )
 from pyignite.utils import is_iterable, status_to_exception
 from .handshake import HandshakeRequest, read_response
@@ -71,9 +71,11 @@ class Client:
     port = None
     timeout = None
     prefetch = None
+    username = None
+    password = None
 
     @staticmethod
-    def check_kwargs(kwargs):
+    def _check_kwargs(kwargs):
         expected_args = [
             'timeout',
             'use_ssl',
@@ -83,6 +85,8 @@ class Client:
             'ssl_keyfile',
             'ssl_certfile',
             'ssl_ca_certfile',
+            'username',
+            'password',
         ]
         for kw in kwargs:
             if kw not in expected_args:
@@ -103,7 +107,8 @@ class Client:
          operation including `connect`. 0 means non-blocking mode. Can accept
          integer or float value. Default is None (blocking mode),
         :param use_ssl: (optional) set to True if Ignite server uses SSL
-         on its binary connector. Defaults to not use SSL,
+         on its binary connector. Defaults to not use SSL, except when
+         username and password has been supplied,
         :param ssl_version: (optional) SSL version constant from standard
          `ssl` module. Defaults to TLS v1.1, as in Ignite 2.5,
         :param ssl_ciphers: (optional) ciphers to use. If not provided,
@@ -122,11 +127,18 @@ class Client:
          to identify local (client) party,
         :param ssl_ca_certfile: (optional) a path to a trusted certificate
          or a certificate chain. Required to check the validity of the remote
-         (server-side) certificate.
+         (server-side) certificate,
+        :param username: (optional) user name to authenticate to Ignite
+         cluster,
+        :param password: (optional) password to authenticate to Ignite cluster.
         """
         self.prefetch = prefetch
-        self.check_kwargs(kwargs)
+        self._check_kwargs(kwargs)
         self.timeout = kwargs.pop('timeout', None)
+        self.username = kwargs.pop('username', None)
+        self.password = kwargs.pop('password', None)
+        if self.username and self.password:
+            kwargs['use_ssl'] = True
         self.init_kwargs = kwargs
 
     read_response = read_response
@@ -147,23 +159,16 @@ class Client:
         self.socket = self._wrap(self.socket)
         self.socket.connect((host, port))
 
-        hs_request = HandshakeRequest()
+        hs_request = HandshakeRequest(self.username, self.password)
         self.send(hs_request)
         hs_response = self.read_response()
-        if hs_response.op_code == 0:
+        if hs_response['op_code'] == 0:
             self.close()
-            raise SocketError(
+            raise HandshakeError(
                 (
-                    'Ignite protocol version mismatch: '
-                    'requested {}.{}.{}, received {}.{}.{}.'
-                ).format(
-                    PROTOCOL_VERSION_MAJOR,
-                    PROTOCOL_VERSION_MINOR,
-                    PROTOCOL_VERSION_PATCH,
-                    hs_response.version_major,
-                    hs_response.version_minor,
-                    hs_response.version_patch,
-                )
+                    'Handshake error: {message} Expected protocol version: '
+                    '{version_major}.{version_minor}.{version_patch}.'
+                ).format(**hs_response)
             )
         self.host, self.port = host, port
 
@@ -207,6 +212,16 @@ class Client:
         # exception chaining gives a misleading traceback here
         raise ReconnectError('Can not reconnect: out of nodes') from None
 
+    def _transfer_params(self, to: 'Client'):
+        """
+        Transfer non-SSL parameters to target client object.
+
+        :param target: client object to transfer parameters to.
+        """
+        to.username = self.username
+        to.password = self.password
+        to.nodes = self.nodes
+
     def clone(self) -> 'Client':
         """
         Clones this client in its current state.
@@ -214,7 +229,7 @@ class Client:
         :return: `Client` object.
         """
         clone = Client(**self.init_kwargs)
-        clone.nodes = self.nodes
+        self._transfer_params(to=clone)
         if self.port and self.host:
             clone._connect(self.host, self.port)
         return clone
@@ -228,7 +243,7 @@ class Client:
         :return: `MockClient` object.
         """
         client = MockClient(buffer, **self.init_kwargs)
-        client.nodes = self.nodes
+        self._transfer_params(to=client)
         if self.port and self.host:
             client._connect(self.host, self.port)
         return client
