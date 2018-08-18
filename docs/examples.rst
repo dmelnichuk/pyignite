@@ -49,6 +49,15 @@ Type hints usage
   :language: python
   :lines: 24-48
 
+As a rule of thumb:
+
+- when a `pyignite` method or function deals with a single value or key, it
+  has an additional parameter, like `value_hint` or `key_hint`, which accepts
+  a parser/constructor class,
+
+- nearly any structure element (inside dict or list) can be replaced with
+  a two-tuple of (said element, type hint).
+
 Refer the :ref:`data_types` section for the full list
 of parser/constructor classes you can use as type hints.
 
@@ -168,6 +177,8 @@ Finally, delete the tables used in this example with the following queries:
 Complex objects
 ---------------
 
+.. _sql_cache_read:
+
 Read
 ====
 
@@ -227,6 +238,8 @@ functions.
 .. literalinclude:: ../examples/binary_types.py
   :language: python
   :lines: 302-326
+
+.. _sql_cache_create:
 
 Create
 ======
@@ -351,8 +364,8 @@ Failover
 
 When connection to the server is broken or timed out,
 :class:`~pyignite.client.Client` object raises an appropriate
-exception, but keeps its constructor's parameters intact, so user can
-reconnect, and the connection object remains valid.
+exception, but keeps its constructor's parameters intact and tries
+to reconnect on the next data operation.
 
 The following example features a simple round-robin failover mechanism.
 Launch 3 Ignite nodes on `localhost` and run:
@@ -372,6 +385,9 @@ one node should remain active.
     # Error: Socket connection broken.
     # Error: [Errno 111] Client refused
     # Connected to node 0
+
+In this example, the automatic reconnection happens after the second
+`client.get_or_create_cache()` call.
 
 SSL/TLS
 -------
@@ -443,14 +459,15 @@ the SSL version (`ssl_version`), if the defaults
 Password authentication
 -----------------------
 
-Ignite binary protocol has no support for sending credentials over the open
-channel. Supplying credentials automatically turns SSL on from the client side.
-So it is necessary to secure the connection to the Ignite server, as described
-in `SSL/TLS`_ example, in order to use password authentication.
-
-Plus, you must set `authenticationEnabled` property to `true` and enable
-persistance in Ignite XML configuration file, as described in
+To authenticate you must set `authenticationEnabled` property to `true` and
+enable persistance in Ignite XML configuration file, as described in
 `Authentication`_ section of Ignite documentation.
+
+Be advised that sending credentials over the open channel is greatly
+discouraged, since they can be easily intercepted. Supplying credentials
+automatically turns SSL on from the client side. It is highly recommended
+to secure the connection to the Ignite server, as described
+in `SSL/TLS`_ example, in order to use password authentication.
 
 Then just supply `username` and `password` parameters to
 :class:`~pyignite.client.Client` constructor.
@@ -461,6 +478,13 @@ Then just supply `username` and `password` parameters to
 
     client = Client(username='ignite', password='ignite')
     client.connect('ignite-example.com', 10800)
+
+If you still do not wish to secure the connection is spite of the warning,
+then disable SSL explicitly on creating the client object:
+
+.. code-block:: python3
+
+    client = Client(username='ignite', password='ignite', use_ssl=False)
 
 Note, that it is not possible for Ignite thin client to obtain the cluster's
 authentication settings through the binary protocol. Unexpected credentials

@@ -65,8 +65,8 @@ class Client:
      * binary types registration endpoint.
     """
 
+    _socket = None
     nodes = None
-    socket = None
     host = None
     port = None
     timeout = None
@@ -107,8 +107,8 @@ class Client:
          operation including `connect`. 0 means non-blocking mode. Can accept
          integer or float value. Default is None (blocking mode),
         :param use_ssl: (optional) set to True if Ignite server uses SSL
-         on its binary connector. Defaults to not use SSL, except when
-         username and password has been supplied,
+         on its binary connector. Defaults to use SSL when username
+         and password has been supplied, not to use SSL otherwise,
         :param ssl_version: (optional) SSL version constant from standard
          `ssl` module. Defaults to TLS v1.1, as in Ignite 2.5,
         :param ssl_ciphers: (optional) ciphers to use. If not provided,
@@ -137,12 +137,21 @@ class Client:
         self.timeout = kwargs.pop('timeout', None)
         self.username = kwargs.pop('username', None)
         self.password = kwargs.pop('password', None)
-        if self.username and self.password:
+        if all([self.username, self.password, 'use_ssl' not in kwargs]):
             kwargs['use_ssl'] = True
         self.init_kwargs = kwargs
 
     read_response = read_response
     _wrap = wrap
+
+    @property
+    def socket(self) -> socket.socket:
+        """
+        Network socket.
+        """
+        if self._socket is None:
+            self._reconnect()
+        return self._socket
 
     def __repr__(self) -> str:
         if self.host and self.port:
@@ -154,10 +163,10 @@ class Client:
         """
         Actually connect socket.
         """
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.settimeout(self.timeout)
-        self.socket = self._wrap(self.socket)
-        self.socket.connect((host, port))
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.settimeout(self.timeout)
+        self._socket = self._wrap(self.socket)
+        self._socket.connect((host, port))
 
         hs_request = HandshakeRequest(self.username, self.password)
         self.send(hs_request)
@@ -198,7 +207,7 @@ class Client:
 
         self._connect(host, port)
 
-    def reconnect(self):
+    def _reconnect(self):
         """
         Restore the connection using the next node in `nodes` iterable.
         """
@@ -262,7 +271,11 @@ class Client:
         total_bytes_sent = 0
 
         while total_bytes_sent < len(data):
-            bytes_sent = self.socket.send(data[total_bytes_sent:], **kwargs)
+            try:
+                bytes_sent = self.socket.send(data[total_bytes_sent:], **kwargs)
+            except OSError:
+                self._socket = self.host = self.port = None
+                raise
             if bytes_sent == 0:
                 self.socket.close()
                 raise SocketError('Socket connection broken.')
@@ -278,9 +291,13 @@ class Client:
         """
         pref_size = len(self.prefetch)
         if buffersize > pref_size:
-            result = self.prefetch + self._recv(
-                buffersize-pref_size, flags)
+            result = self.prefetch
             self.prefetch = b''
+            try:
+                result += self._recv(buffersize-pref_size, flags)
+            except (SocketError, OSError):
+                self._socket = self.host = self.port = None
+                raise
             return result
         else:
             result = self.prefetch[:buffersize]
@@ -347,8 +364,11 @@ class Client:
         Creates Ignite cache by name. Raises `CacheError` if such a cache is
         already exists.
 
-        :param settings: cache name or cache properties,
-        :return: Cache object.
+        :param settings: cache name or dict of cache properties' codes
+         and values. All cache properties are documented here:
+         :ref:`cache_props`. See also the
+         :ref:`cache creation example <sql_cache_create>`,
+        :return: :class:`~pyignite.cache.Cache` object.
         """
         from pyignite.cache import Cache
 
@@ -358,8 +378,11 @@ class Client:
         """
         Creates Ignite cache, if not exist.
 
-        :param settings: cache name or cache properties,
-        :return: Cache object.
+        :param settings: cache name or dict of cache properties' codes
+         and values. All cache properties are documented here:
+         :ref:`cache_props`. See also the
+         :ref:`cache creation example <sql_cache_create>`,
+        :return: :class:`~pyignite.cache.Cache` object.
         """
         from pyignite.cache import Cache
 
@@ -373,7 +396,7 @@ class Client:
 
         :param settings: cache name or cache properties (but only `PROP_NAME`
          property is allowed),
-        :return: Cache object.
+        :return: :class:`~pyignite.cache.Cache` object.
         """
         from pyignite.cache import Cache
 
@@ -475,8 +498,9 @@ class Client:
         Mark socket closed. This is recommended but not required, since
         sockets are automatically closed when they are garbage-collected.
         """
-        self.socket.close()
-        self.socket = self.host = self.port = None
+        self._socket.shutdown(socket.SHUT_RDWR)
+        self._socket.close()
+        self._socket = self.host = self.port = None
 
 
 class MockClient(Client):

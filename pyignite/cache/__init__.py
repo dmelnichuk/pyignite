@@ -125,7 +125,10 @@ class Cache:
     @property
     def settings(self) -> Optional[dict]:
         """
-        Lazy Cache settings.
+        Lazy Cache settings. See the :ref:`example <sql_cache_read>`
+        of reading this property.
+
+        All cache properties are documented here: :ref:`cache_props`.
 
         :return: dict of cache properties and their values.
         """
@@ -153,7 +156,7 @@ class Cache:
     @property
     def client(self) -> Client:
         """
-        Ignite Client object.
+        Ignite :class:`~pyignite.client.Client` object.
 
         :return: Client object, through which the cache is accessed.
         """
@@ -528,7 +531,7 @@ class Cache:
                 v = self._process_binary(v)
                 yield k, v
 
-    def sql(
+    def select_row(
         self, query_str: str, page_size: int=1,
         query_args: Optional[list]=None, distributed_joins: bool=False,
         replicated_only: bool=False, local: bool=False, timeout: int=0
