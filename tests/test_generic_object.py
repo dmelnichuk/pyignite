@@ -13,5 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pyignite.client import Client
 from pyignite.client.binary import GenericObjectMeta
+from pyignite.datatypes import *
+
+
+def test_go():
+
+    class GenericObject(
+        metaclass=GenericObjectMeta,
+        schema={
+            'TEST_ID': IntObject,
+            'TEST_NAME': String,
+        },
+        version=2,
+    ):
+        pass
+
+    x = GenericObject()
+    print(x.__class__.__name__)

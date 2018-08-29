@@ -18,7 +18,6 @@ from datetime import date, datetime, time, timedelta
 import decimal
 import uuid
 
-from pyignite import Client
 from pyignite.constants import *
 from .type_codes import *
 from .null_object import Null
@@ -47,7 +46,7 @@ class StandardObject:
         raise NotImplementedError('This object is generic')
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         tc_type = client.recv(ctypes.sizeof(ctypes.c_byte))
 
         if tc_type == TC_NULL:
@@ -64,6 +63,7 @@ class String:
     UTF-8-encoded, so that one character may take 1 to 4 bytes.
     """
     type_code = TC_STRING
+    pythonic = str
 
     @classmethod
     def build_c_type(cls, length: int):
@@ -81,7 +81,7 @@ class String:
         )
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         tc_type = client.recv(ctypes.sizeof(ctypes.c_byte))
         # String or Null
         if tc_type == TC_NULL:
@@ -126,6 +126,8 @@ class String:
 
 class DecimalObject:
     type_code = TC_DECIMAL
+    pythonic = decimal.Decimal
+    default = decimal.Decimal('0.00')
 
     @classmethod
     def build_c_header(cls):
@@ -143,7 +145,7 @@ class DecimalObject:
         )
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         tc_type = client.recv(ctypes.sizeof(ctypes.c_byte))
         # Decimal or Null
         if tc_type == TC_NULL:
@@ -278,6 +280,8 @@ class TimestampObject(StandardObject):
     tuple(datetime.datetime, integer).
     """
     type_code = TC_TIMESTAMP
+    pythonic = tuple
+    default = (datetime(1970, 1, 1), 0)
 
     @classmethod
     def build_c_type(cls):
@@ -329,6 +333,8 @@ class DateObject(StandardObject):
     Represented as a naive datetime.datetime in Python.
     """
     type_code = TC_DATE
+    pythonic = datetime
+    default = datetime(1970, 1, 1)
 
     @classmethod
     def build_c_type(cls):
@@ -376,6 +382,8 @@ class TimeObject(StandardObject):
     Represented as a datetime.timedelta in Python.
     """
     type_code = TC_TIME
+    pythonic = timedelta
+    default = timedelta()
 
     @classmethod
     def build_c_type(cls):
@@ -493,7 +501,7 @@ class StandardArray:
         )
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         header_class = cls.build_header_class()
         buffer = client.recv(ctypes.sizeof(header_class))
         header = header_class.from_buffer_copy(buffer)
@@ -577,6 +585,8 @@ class EnumArray(StandardArray):
 
 
 class StandardArrayObject(StandardArray):
+    pythonic = list
+    default = []
 
     @classmethod
     def build_header_class(cls):

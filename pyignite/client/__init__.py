@@ -35,15 +35,19 @@ a generator with result rows.
 the registry for Ignite Complex Objects.
 """
 
+from collections import defaultdict, OrderedDict
 import socket
-from typing import Iterable, Union
+from typing import Iterable, Type, Union
 
 from pyignite.constants import *
 from pyignite.exceptions import (
     BinaryTypeError, CacheError, HandshakeError, ParameterError,
     ReconnectError, SocketError, SocketWriteError, SQLError,
 )
-from pyignite.utils import is_iterable, status_to_exception
+from pyignite.utils import (
+    entity_id, is_iterable, schema_id, status_to_exception,
+)
+from .binary import GenericObjectMeta
 from .handshake import HandshakeRequest, read_response
 from .ssl import wrap
 
@@ -73,6 +77,8 @@ class Client:
     prefetch = None
     username = None
     password = None
+
+    binary_registry = defaultdict(dict)
 
     @staticmethod
     def _check_kwargs(kwargs):
@@ -230,8 +236,9 @@ class Client:
         to.username = self.username
         to.password = self.password
         to.nodes = self.nodes
+        to.binary_registry = self.binary_registry
 
-    def clone(self) -> 'Client':
+    def clone(self, prefetch: bytes=b'') -> 'Client':
         """
         Clones this client in its current state.
 
@@ -241,6 +248,7 @@ class Client:
         self._transfer_params(to=clone)
         if self.port and self.host:
             clone._connect(self.host, self.port)
+        clone.prefetch = prefetch
         return clone
 
     def mock(self, buffer: bytes) -> 'MockClient':
@@ -324,25 +332,113 @@ class Client:
 
         return b''.join(chunks)
 
-    @status_to_exception(BinaryTypeError)
-    def get_binary_type(self, binary_type: Union[str, int]) -> dict:
+    def get_binary_type(
+        self, binary_type: Union[str, int], schema: Union[dict, int]=None
+    ) -> dict:
         """
         Gets the binary type information by type ID.
 
-        :param binary_type: binary type name or ID,
-        :return: binary type description with type ID and schemas.
+        :param binary_type: binary object type name or ID,
+        :param schema: (optional) binary object schema or schema ID,
+        :return: binary type description − a dict with the following fields:
+
+         - `type_exists`: True if the type is registered, False otherwise,
+         - `type_id`: Complex object type ID, integer value,
+         - `type name`: Complex object type name,
+         - `affinity_key_field`: string value or None,
+         - `is_enum`: False in case of Complex object registration,
+         - `schemas`: a list of schemas in format OrderedDict[field name:
+           field type hint]. Contains only one schema, if `schema` parameter
+           is provided. Schema can be empty.
         """
         from pyignite.api.binary import get_binary_type
+        from pyignite.datatypes.internal import tc_map
 
-        return get_binary_type(self, binary_type)
+        def convert_type(tc_type: int):
+            from pyignite.datatypes import BinaryObject
 
-    @status_to_exception(BinaryTypeError)
+            try:
+                return tc_map(tc_type.to_bytes(1, PROTOCOL_BYTE_ORDER))
+            except (KeyError, OverflowError):
+                # if conversion to char or type lookup failed,
+                # we probably have a binary object type ID
+                return BinaryObject
+
+        def convert_schema(
+            field_ids: list, binary_fields: list
+        ) -> OrderedDict:
+            converted_schema = OrderedDict()
+            for field_id in field_ids:
+                binary_field = [
+                    x
+                    for x in binary_fields
+                    if x['field_id'] == field_id
+                ][0]
+                converted_schema[binary_field['field_name']] = convert_type(
+                    binary_field['type_id']
+                )
+            return converted_schema
+
+        def one_schema_result(result_value: dict, schema: OrderedDict):
+            result = result_value.copy()
+            result['schemas'] = [schema]
+            return result
+
+        if type(schema) in [int, type(None)]:
+            # do not look up the binary types registry! Do a server query
+            # and update the registry with the returned results instead
+            result = get_binary_type(self, binary_type)
+            if result.status != 0:
+                raise BinaryTypeError(result.message)
+            if not result.value['type_exists']:
+                return result.value
+
+            binary_fields = result.value.pop('binary_fields')
+            old_format_schemas = result.value.pop('schema')
+            schemas = []
+            for s_id, field_ids in old_format_schemas.items():
+                converted_schema = convert_schema(field_ids, binary_fields)
+                reg_key = (entity_id(binary_type), s_id)
+                self.binary_registry[reg_key].update(
+                    one_schema_result(result.value, converted_schema)
+                )
+                if any([schema == s_id, schema is None]):
+                    schemas.append(converted_schema)
+            result.value['schemas'] = schemas
+            return result.value
+        else:
+            # first look up the registry, then query the server
+            memoized = self.binary_registry.get(
+                (entity_id(binary_type), schema_id(schema)), None
+            )
+            if memoized:
+                return memoized
+
+            result = get_binary_type(self, binary_type)
+            if result.status != 0:
+                raise BinaryTypeError(result.message)
+            if not result.value['type_exists']:
+                return result.value
+
+            binary_fields = result.value.pop('binary_fields')
+            old_format_schemas = result.value.pop('schema')
+            exact_result = {'type_exists': False}
+            for s_id, field_ids in old_format_schemas.items():
+                converted_schema = convert_schema(field_ids, binary_fields)
+                result = one_schema_result(result.value, converted_schema)
+                self.binary_registry[(entity_id(binary_type), s_id)] = result
+                if s_id == schema_id(schema):
+                    exact_result = result
+            return exact_result
+
     def put_binary_type(
-        self, type_name: str, affinity_key_field: str=None,
-        is_enum=False, schema: dict=None
-    ):
+        self, type_name: str=None, affinity_key_field: str=None,
+        is_enum=False, schema: OrderedDict=None, data_class: Type=None,
+    ) -> dict:
         """
-        Registers binary type information in cluster.
+        Registers binary type information in cluster. Refers to a local (one
+        per client class) binary type registry − a set of (binary type ID,
+        schema ID) tuples − to minimize server load.
 
         :param type_name: name of the data type being registered,
         :param affinity_key_field: (optional) name of the affinity key field,
@@ -351,13 +447,66 @@ class Client:
         :param schema: (optional) when register enum, pass a dict
          of enumerated parameter names as keys and an integers as values.
          When register binary type, pass a dict of field names: field types.
-         Binary type with no fields is OK.
+         Binary type with no fields is OK,
+        :param data_class: (optional) custom data class to associate with
+         given binary type and schema. If not provided, a minimal data class
+         will be created with a help of
+         :class:`~pyignite.client.binary.GenericObjectMeta`,
+        :return: binary type description − a dict with the following fields:
+
+         - `type_exists`: True if the type is registered, False otherwise,
+         - `type_id`: Complex object type ID, integer value,
+         - `type name`: Complex object type name,
+         - `affinity_key_field`: string value or None,
+         - `is_enum`: False in case of Complex object registration,
+         - `schemas`: a list, containing a current Complex object schema
+           in format: OrderedDict[field name: field type hint]. Schema can
+           be empty.
         """
         from pyignite.api.binary import put_binary_type
 
-        return put_binary_type(
-            self, type_name, affinity_key_field, is_enum, schema
-        )
+        if data_class:
+            type_name = data_class.type_name
+            type_id = data_class.type_id
+            schema = data_class.schema
+            s_id = data_class.schema_id
+        else:
+            if not type_name:
+                raise ParameterError(
+                    'Please provide at least binary type name or dataclass '
+                    'to register Binary object'
+                )
+            type_id = entity_id(type_name)
+            schema = schema or OrderedDict()
+            s_id = schema_id(schema)
+
+        if (type_id, s_id) in self.binary_registry:
+            return self.binary_registry[(type_id, s_id)]
+        else:
+            binary_result = put_binary_type(
+                self, type_name, affinity_key_field, is_enum, schema
+            )
+            if binary_result.status != 0:
+                raise BinaryTypeError(binary_result.message)
+
+            result = {
+                'type_exists': True,
+                'type_name': type_name,
+                'type_id': binary_result.value['type_id'],
+                'schemas': [schema],
+                'affinity_key_field': affinity_key_field,
+                'is_enum': is_enum,
+            }
+            if data_class:
+                result['data_class'] = data_class
+            self.binary_registry[(
+                binary_result.value['type_id'],
+                binary_result.value['schema_id']
+            )].update(result)
+            return self.binary_registry[(
+                binary_result.value['type_id'],
+                binary_result.value['schema_id']
+            )]
 
     def create_cache(self, settings: Union[str, dict]) -> 'Cache':
         """

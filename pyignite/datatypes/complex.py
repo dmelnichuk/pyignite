@@ -17,10 +17,9 @@ from collections import OrderedDict
 import ctypes
 from importlib import import_module
 
-from pyignite import Client
 from pyignite.constants import *
 from pyignite.exceptions import ParseError
-from pyignite.utils import hashcode, is_hinted
+from pyignite.utils import hashcode, is_hinted, schema_id
 from .internal import AnyDataObject
 from .type_codes import *
 
@@ -55,7 +54,7 @@ class ObjectArrayObject:
         )
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         header_class = cls.build_header()
         buffer = client.recv(ctypes.sizeof(header_class))
         header = header_class.from_buffer_copy(buffer)
@@ -136,7 +135,7 @@ class WrappedDataObject:
         )
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         header_class = cls.build_header()
         buffer = client.recv(ctypes.sizeof(header_class))
         header = header_class.from_buffer_copy(buffer)
@@ -176,6 +175,8 @@ class CollectionObject(ObjectArrayObject):
     """
     type_code = TC_COLLECTION
     type_or_id_name = 'type'
+    pythonic = list
+    default = []
 
     @classmethod
     def build_header(cls):
@@ -217,7 +218,7 @@ class Map:
         )
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         from .internal import AnyDataObject
 
         header_class = cls.build_header()
@@ -295,6 +296,8 @@ class MapObject(Map):
     counts pairs. Very annoying.
     """
     type_code = TC_MAP
+    pythonic = dict
+    default = {}
 
     @classmethod
     def build_header(cls):
@@ -360,24 +363,19 @@ class BinaryObject:
         return ctypes.c_uint
 
     @staticmethod
-    def get_fields(client: Client, header) -> list:
-        from pyignite.api import get_binary_type
-        from pyignite.datatypes.internal import tc_map
-
+    def get_schema(client: 'Client', header) -> OrderedDict:
         # get field names from outer space
         temp_conn = client.clone()
-        result = get_binary_type(temp_conn, header.type_id)
+        result = temp_conn.get_binary_type(header.type_id, header.schema_id)
         temp_conn.close()
-        schema = result.value['schema'][header.schema_id]
-
-        return [
-            (x['field_name'], tc_map(bytes([x['type_id']])))
-            for x in result.value['binary_fields']
-            if x['field_id'] in schema
-        ]
+        if not result['type_exists']:
+            raise ParseError('Binary type is not registered')
+        return next(iter([
+            s for s in result['schemas'] if schema_id(s) == header.schema_id
+        ]))
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         from pyignite.datatypes import Struct
 
         header_class = cls.build_header()
@@ -385,7 +383,7 @@ class BinaryObject:
         header = header_class.from_buffer_copy(buffer)
 
         # TODO: valid only on compact schema approach
-        fields = cls.get_fields(client, header)
+        fields = cls.get_schema(client, header).items()
         object_fields_struct = Struct(fields)
         object_fields, object_fields_buffer = object_fields_struct.parse(client)
         buffer += object_fields_buffer
@@ -404,28 +402,38 @@ class BinaryObject:
                 '_fields_': final_class_fields,
             }
         )
+        # forward the client reference
+        setattr(final_class, 'client', client)
         return final_class, buffer
 
     @classmethod
     def to_python(cls, ctype_object):
-        result = {
-            'version': ctype_object.version,
-            'type_id': ctype_object.type_id,
-            'hash_code': ctype_object.hash_code,
-            'schema_id': ctype_object.schema_id,
-            'fields': OrderedDict(),
-        }
+        from pyignite.client.binary import GenericObjectMeta
+
+        type_info = ctype_object.client.get_binary_type(
+            ctype_object.type_id,
+            ctype_object.schema_id
+        )
+        data_class = type_info.get('data_class', None) or GenericObjectMeta(
+            type_info['type_name'], (), {}, schema=type_info['schemas'][0]
+        )
+        ctype_object.client.put_binary_type(data_class=data_class)
+        result = data_class()
+        setattr(result, 'version', ctype_object.version)
+
         # hack, but robust
         for field_name, field_c_type in ctype_object.object_fields._fields_:
             module = import_module(field_c_type.__module__)
             object_class = getattr(module, field_c_type.__name__)
-            result['fields'][field_name] = object_class.to_python(
-                getattr(ctype_object.object_fields, field_name)
+            setattr(
+                result, field_name, object_class.to_python(
+                    getattr(ctype_object.object_fields, field_name)
+                )
             )
         return result
 
     @classmethod
-    def from_python(cls, value: dict):
+    def from_python(cls, value: object):
         # prepare header
         header_class = cls.build_header()
         header = header_class()
@@ -435,27 +443,19 @@ class BinaryObject:
         )
         # TODO: compact footer & no raw data is the only supported variant
         header.flags = cls.USER_TYPE | cls.HAS_SCHEMA | cls.COMPACT_FOOTER
-        header.version = value['version']
-        header.type_id = value['type_id']
-        header.schema_id = value['schema_id']
-        # create fields
-        field_data = {}
-        field_types = []
-        for field_name, field_value_or_pair in value['fields'].items():
-            if is_hinted(field_value_or_pair):
-                field_value, field_type = field_value_or_pair
-            else:
-                field_value = field_value_or_pair
-                field_type = AnyDataObject.map_python_type(field_value)
-
-            field_data[field_name] = field_value
-            field_types.append((field_name, field_type))
+        header.version = value.version
+        header.type_id = value.type_id
+        header.schema_id = value.schema_id
 
         # create fields and calculate offsets
         field_buffer = b''
         offsets = [ctypes.sizeof(header_class)]
-        for field_name, field_type in field_types:
-            partial_buffer = field_type.from_python(field_data[field_name])
+        for field_name, field_type in value.schema.items():
+            partial_buffer = field_type.from_python(
+                getattr(
+                    value, field_name, getattr(field_type, 'default', None)
+                )
+            )
             offsets.append(max(offsets) + len(partial_buffer))
             field_buffer += partial_buffer
 

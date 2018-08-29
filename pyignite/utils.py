@@ -16,6 +16,8 @@
 from functools import wraps
 from typing import Any, Type, Union
 
+from pyignite.constants import *
+
 
 def is_iterable(value):
     """ Check if value is iterable. """
@@ -24,6 +26,18 @@ def is_iterable(value):
         return True
     except TypeError:
         return False
+
+
+def is_binary(value):
+    """
+    Check if a value is a pythonic representation of a Complex object.
+    """
+    return all([
+        hasattr(value, 'type_name'),
+        hasattr(value, 'type_id'),
+        hasattr(value, 'schema'),
+        hasattr(value, 'schema_id'),
+    ])
 
 
 def is_hinted(value):
@@ -53,30 +67,21 @@ def int_overflow(value: int) -> int:
     return ((value ^ 0x80000000) & 0xffffffff) - 0x80000000
 
 
-def unwrap_binary(client, wrapped: tuple, recurse: bool=True):
+def unwrap_binary(client: 'Client', wrapped: tuple):
     """
     Unwrap wrapped BinaryObject and convert it to Python data.
 
     :param client: connection to Ignite cluster,
     :param wrapped: `WrappedDataObject` value,
-    :param recurse: unwrap recursively using a simple heuristic to detect
-     nested `WrappedDataObject`\ s,
     :return: dict representing wrapped BinaryObject.
     """
     from pyignite.datatypes import BinaryObject
 
     blob, offset = wrapped
-    mock_conn = client.mock(blob)
-    mock_conn.pos = offset
-    data_class, data_bytes = BinaryObject.parse(mock_conn)
-    result = BinaryObject.to_python(data_class.from_buffer_copy(data_bytes))
-
-    if recurse:
-        for key, value in result['fields'].items():
-            if is_wrapped(value):
-                result[key] = unwrap_binary(client, value, recurse)
-
-    return result
+    client_clone = client.clone(prefetch=blob)
+    client_clone.pos = offset
+    data_class, data_bytes = BinaryObject.parse(client_clone)
+    return BinaryObject.to_python(data_class.from_buffer_copy(data_bytes))
 
 
 def hashcode(string: Union[str, bytes]) -> int:
@@ -114,6 +119,29 @@ def entity_id(cache: Union[str, int]) -> int:
     :return: entity ID.
     """
     return cache if type(cache) is int else hashcode(cache.lower())
+
+
+def schema_id(schema: Union[int, dict]) -> int:
+    """
+    Calculate Complex Object schema ID.
+
+    :param schema: a dict of field names: field types,
+    :return: schema ID.
+    """
+    if type(schema) is int:
+        return schema
+    s_id = FNV1_OFFSET_BASIS if schema else 0
+    for field_name in schema.keys():
+        field_id = entity_id(field_name)
+        s_id ^= (field_id & 0xff)
+        s_id = int_overflow(s_id * FNV1_PRIME)
+        s_id ^= ((field_id >> 8) & 0xff)
+        s_id = int_overflow(s_id * FNV1_PRIME)
+        s_id ^= ((field_id >> 16) & 0xff)
+        s_id = int_overflow(s_id * FNV1_PRIME)
+        s_id ^= ((field_id >> 24) & 0xff)
+        s_id = int_overflow(s_id * FNV1_PRIME)
+    return s_id
 
 
 def status_to_exception(exc: Type[Exception]):

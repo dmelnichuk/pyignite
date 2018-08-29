@@ -22,10 +22,9 @@ import uuid
 
 import attr
 
-from pyignite import Client
 from pyignite.constants import *
 from pyignite.exceptions import ParseError
-from pyignite.utils import is_hinted, is_iterable
+from pyignite.utils import is_binary, is_hinted, is_iterable
 from .type_codes import *
 
 
@@ -121,7 +120,7 @@ class StructArray:
             },
         )
 
-    def parse(self, client: Client):
+    def parse(self, client: 'Client'):
         buffer = client.recv(ctypes.sizeof(self.counter_type))
         length = int.from_bytes(buffer, byteorder=PROTOCOL_BYTE_ORDER)
         fields = []
@@ -174,7 +173,7 @@ class Struct:
     fields = attr.ib(type=list)
     dict_type = attr.ib(default=OrderedDict)
 
-    def parse(self, client: Client) -> Tuple[type, bytes]:
+    def parse(self, client: 'Client') -> Tuple[type, bytes]:
         buffer = b''
         fields = []
 
@@ -250,7 +249,7 @@ class AnyDataObject:
             return type_first
 
     @classmethod
-    def parse(cls, client: Client):
+    def parse(cls, client: 'Client'):
         type_code = client.recv(ctypes.sizeof(ctypes.c_byte))
         try:
             data_class = tc_map(type_code)
@@ -275,7 +274,7 @@ class AnyDataObject:
             DateObject, TimeObject, DecimalObject, LongArrayObject,
             DoubleArrayObject, StringArrayObject, BoolArrayObject,
             UUIDArrayObject, DateArrayObject, TimeArrayObject,
-            DecimalArrayObject, MapObject, ObjectArrayObject,
+            DecimalArrayObject, MapObject, ObjectArrayObject, BinaryObject,
         )
 
         python_map = {
@@ -332,6 +331,9 @@ class AnyDataObject:
                 'Type `array of {}` is invalid'.format(value_subtype)
             )
 
+        if is_binary(value):
+            return BinaryObject
+
         if value_type in python_map:
             return python_map[value_type]
         raise TypeError(
@@ -362,7 +364,7 @@ class AnyDataArray(AnyDataObject):
             }
         )
 
-    def parse(self, client: Client):
+    def parse(self, client: 'Client'):
         header_class = self.build_header()
         buffer = client.recv(ctypes.sizeof(header_class))
         header = header_class.from_buffer_copy(buffer)
