@@ -22,7 +22,7 @@ Prerequisites
 
 - *Python 3.4* or above (3.6 is tested),
 - Access to *Apache Ignite* node, local or remote. The current thin client
-  version was tested on *Apache Ignite 2.5*.
+  version was tested on *Apache Ignite 2.7.0* (binary client protocol 1.2.0).
 
 
 Installation
@@ -117,7 +117,12 @@ SSL-related `pytest` parameters are:
 ``--ssl-version`` − SSL version:
 
 - ``TLSV1_1`` (default),
-- ``TLSV1_2``,
+- ``TLSV1_2``.
+
+Other `pytest` parameters:
+
+``--timeout`` − timeout (in seconds) for each socket operation, including
+`connect`. Can accept integer or float value. Default is None (blocking mode),
 
 ``--username`` and ``--password`` − credentials to authenticate to Ignite
 cluster. Used in conjunction with `authenticationEnabled` property in cluster

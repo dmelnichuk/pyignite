@@ -67,7 +67,15 @@ QueryFields = StructArray([
     ('is_key_field', Bool),
     ('is_notnull_constraint_field', Bool),
     ('default_value', AnyDataObject),
-])
+    ('precision', Int),
+    ('scale', Int),
+], defaults={
+    'is_key_field': False,
+    'is_notnull_constraint_field': False,
+    'default_value': None,
+    'precision': -1,
+    'scale': -1,
+})
 
 
 FieldNameAliases = StructArray([
@@ -79,7 +87,9 @@ FieldNameAliases = StructArray([
 Fields = StructArray([
     ('name', String),
     ('is_descending', Bool),
-])
+], defaults={
+    'is_descending': False,
+})
 
 
 QueryIndexes = StructArray([
