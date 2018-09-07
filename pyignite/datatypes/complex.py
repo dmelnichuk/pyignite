@@ -19,7 +19,7 @@ import inspect
 
 from pyignite.constants import *
 from pyignite.exceptions import ParseError
-from pyignite.utils import hashcode, is_hinted
+from pyignite.utils import entity_id, hashcode, is_hinted
 from .internal import AnyDataObject
 from .type_codes import *
 
@@ -76,12 +76,13 @@ class ObjectArrayObject:
         return final_class, buffer
 
     @classmethod
-    def to_python(cls, ctype_object):
+    def to_python(cls, ctype_object, *args, **kwargs):
         result = []
         for i in range(ctype_object.length):
             result.append(
                 AnyDataObject.to_python(
-                    getattr(ctype_object, 'element_{}'.format(i))
+                    getattr(ctype_object, 'element_{}'.format(i)),
+                    *args, **kwargs
                 )
             )
         return getattr(ctype_object, cls.type_or_id_name), result
@@ -157,7 +158,7 @@ class WrappedDataObject:
         return final_class, buffer
 
     @classmethod
-    def to_python(cls, ctype_object):
+    def to_python(cls, ctype_object, *args, **kwargs):
         return bytes(ctype_object.payload), ctype_object.offset
 
     @classmethod
@@ -242,7 +243,7 @@ class Map:
         return final_class, buffer
 
     @classmethod
-    def to_python(cls, ctype_object):
+    def to_python(cls, ctype_object, *args, **kwargs):
         from .internal import AnyDataObject
 
         map_type = getattr(ctype_object, 'type', cls.HASH_MAP)
@@ -250,10 +251,12 @@ class Map:
 
         for i in range(0, ctype_object.length << 1, 2):
             k = AnyDataObject.to_python(
-                    getattr(ctype_object, 'element_{}'.format(i))
+                    getattr(ctype_object, 'element_{}'.format(i)),
+                    *args, **kwargs
                 )
             v = AnyDataObject.to_python(
-                    getattr(ctype_object, 'element_{}'.format(i + 1))
+                    getattr(ctype_object, 'element_{}'.format(i + 1)),
+                    *args, **kwargs
                 )
             result[k] = v
         return result
@@ -315,8 +318,10 @@ class MapObject(Map):
         )
 
     @classmethod
-    def to_python(cls, ctype_object):
-        return ctype_object.type, super().to_python(ctype_object)
+    def to_python(cls, ctype_object, *args, **kwargs):
+        return ctype_object.type, super().to_python(
+            ctype_object, *args, **kwargs
+        )
 
     @classmethod
     def from_python(cls, value):
@@ -362,6 +367,22 @@ class BinaryObject:
             return ctypes.c_uint16
         return ctypes.c_uint
 
+    @classmethod
+    def schema_type(cls, flags: int):
+        if flags & cls.COMPACT_FOOTER:
+            return cls.offset_c_type(flags)
+        return type(
+            'SchemaElement',
+            (ctypes.LittleEndianStructure,),
+            {
+                '_pack_': 1,
+                '_fields_': [
+                    ('field_id', ctypes.c_int),
+                    ('offset', cls.offset_c_type(flags)),
+                ],
+            },
+        )
+
     @staticmethod
     def get_dataclass(client: 'Client', header) -> OrderedDict:
         # get field names from outer space
@@ -380,7 +401,8 @@ class BinaryObject:
         buffer = client.recv(ctypes.sizeof(header_class))
         header = header_class.from_buffer_copy(buffer)
 
-        # TODO: valid only on compact schema approach
+        # ignore full schema, always retrieve fields' types and order
+        # from complex types registry
         data_class = cls.get_dataclass(client, header)
         fields = data_class.schema.items()
         object_fields_struct = Struct(fields)
@@ -389,7 +411,7 @@ class BinaryObject:
         final_class_fields = [('object_fields', object_fields)]
 
         if header.flags & cls.HAS_SCHEMA:
-            schema = cls.offset_c_type(header.flags) * len(fields)
+            schema = cls.schema_type(header.flags) * len(fields)
             buffer += client.recv(ctypes.sizeof(schema))
             final_class_fields.append(('schema', schema))
 
@@ -401,13 +423,19 @@ class BinaryObject:
                 '_fields_': final_class_fields,
             }
         )
-        # forward the client reference
-        setattr(final_class, 'client', client)
+        # register schema encoding approach
+        client.compact_footer = bool(header.flags & cls.COMPACT_FOOTER)
         return final_class, buffer
 
     @classmethod
-    def to_python(cls, ctype_object):
-        data_class = ctype_object.client.query_binary_type(
+    def to_python(cls, ctype_object, client: 'Client'=None, *args, **kwargs):
+
+        if not client:
+            raise ParseError(
+                'Can not query binary type {}'.format(ctype_object.type_id)
+            )
+
+        data_class = client.query_binary_type(
             ctype_object.type_id,
             ctype_object.schema_id
         )
@@ -417,7 +445,8 @@ class BinaryObject:
         for field_name, field_type in data_class.schema.items():
             setattr(
                 result, field_name, field_type.to_python(
-                    getattr(ctype_object.object_fields, field_name)
+                    getattr(ctype_object.object_fields, field_name),
+                    client, *args, **kwargs
                 )
             )
         return result
@@ -438,19 +467,23 @@ class BinaryObject:
                     frame = rec[0]
                     code = frame.f_code
                     for varname in code.co_varnames:
-                        if varname in ['client', 'connection', 'self']:
-                            suspect = frame.f_locals[varname]
-                            if isinstance(suspect, Client):
-                                return suspect
+                        suspect = frame.f_locals[varname]
+                        if isinstance(suspect, Client):
+                            return suspect
             finally:
                 del frame
 
+        compact_footer = True
         client = find_client()
         if client:
-            # if no client will be found (which is hardly imaginable, but
-            # still possible), the class of the `value` will be discarded
-            # and the new dataclass will be automatically registered
+            # if no client can be found, the class of the `value` is discarded
+            # and the new dataclass is automatically registered later on
             client.register_binary_type(value.__class__)
+            compact_footer = client.compact_footer
+        else:
+            raise Warning(
+                'Can not register binary type {}'.format(value.type_name)
+            )
 
         # prepare header
         header_class = cls.build_header()
@@ -459,8 +492,10 @@ class BinaryObject:
             cls.type_code,
             byteorder=PROTOCOL_BYTE_ORDER
         )
-        # TODO: compact footer & no raw data is the only supported variant
-        header.flags = cls.USER_TYPE | cls.HAS_SCHEMA | cls.COMPACT_FOOTER
+
+        header.flags = cls.USER_TYPE | cls.HAS_SCHEMA
+        if compact_footer:
+            header.flags |= cls.COMPACT_FOOTER
         header.version = value.version
         header.type_id = value.type_id
         header.schema_id = value.schema_id
@@ -468,7 +503,8 @@ class BinaryObject:
         # create fields and calculate offsets
         field_buffer = b''
         offsets = [ctypes.sizeof(header_class)]
-        for field_name, field_type in value.schema.items():
+        schema_items = list(value.schema.items())
+        for field_name, field_type in schema_items:
             partial_buffer = field_type.from_python(
                 getattr(
                     value, field_name, getattr(field_type, 'default', None)
@@ -484,10 +520,15 @@ class BinaryObject:
             header.flags |= cls.OFFSET_ONE_BYTE
         elif max(offsets) < 65535:
             header.flags |= cls.OFFSET_TWO_BYTES
-        schema_class = cls.offset_c_type(header.flags) * len(offsets)
+        schema_class = cls.schema_type(header.flags) * len(offsets)
         schema = schema_class()
-        for i, offset in enumerate(offsets):
-            schema[i] = offset
+        if compact_footer:
+            for i, offset in enumerate(offsets):
+                schema[i] = offset
+        else:
+            for i, offset in enumerate(offsets):
+                schema[i].field_id = entity_id(schema_items[i][0])
+                schema[i].offset = offset
         # calculate size and hash code
         header.schema_offset = ctypes.sizeof(header_class) + len(field_buffer)
         header.length = header.schema_offset + ctypes.sizeof(schema_class)
