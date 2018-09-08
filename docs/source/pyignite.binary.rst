@@ -1,7 +1,7 @@
-pyignite.client module
+pyignite.binary module
 ======================
 
-.. automodule:: pyignite.client
+.. automodule:: pyignite.binary
     :members:
     :undoc-members:
     :show-inheritance:
