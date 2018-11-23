@@ -21,28 +21,32 @@ There can't be null type, because null payload takes exactly 0 bytes.
 
 import ctypes
 
+from .base import IgniteDataType
 from .type_codes import TC_NULL
 
 
 __all__ = ['Null']
 
 
-class Null:
+class Null(IgniteDataType):
     default = None
     pythonic = type(None)
+    _object_c_type = None
 
     @classmethod
     def build_c_type(cls):
-        return type(
-            cls.__name__,
-            (ctypes.LittleEndianStructure,),
-            {
-                '_pack_': 1,
-                '_fields_': [
-                    ('type_code', ctypes.c_byte),
-                ],
-            },
-        )
+        if cls._object_c_type is None:
+            cls._object_c_type = type(
+                cls.__name__,
+                (ctypes.LittleEndianStructure,),
+                {
+                    '_pack_': 1,
+                    '_fields_': [
+                        ('type_code', ctypes.c_byte),
+                    ],
+                },
+            )
+        return cls._object_c_type
 
     @classmethod
     def parse(cls, client: 'Client'):

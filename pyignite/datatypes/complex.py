@@ -20,7 +20,8 @@ import inspect
 from pyignite.constants import *
 from pyignite.exceptions import ParseError
 from pyignite.utils import entity_id, hashcode, is_hinted
-from .internal import AnyDataObject
+from .base import IgniteDataType
+from .internal import AnyDataObject, infer_from_python
 from .type_codes import *
 
 
@@ -30,7 +31,7 @@ __all__ = [
 ]
 
 
-class ObjectArrayObject:
+class ObjectArrayObject(IgniteDataType):
     """
     Array of objects of any type. Its Python representation is
     tuple(type_id, iterable of any type).
@@ -106,11 +107,11 @@ class ObjectArrayObject:
         buffer = bytes(header)
 
         for x in value:
-            buffer += AnyDataObject.from_python(x)
+            buffer += infer_from_python(x)
         return buffer
 
 
-class WrappedDataObject:
+class WrappedDataObject(IgniteDataType):
     """
     One or more binary objects can be wrapped in an array. This allows reading,
     storing, passing and writing objects efficiently without understanding
@@ -195,7 +196,7 @@ class CollectionObject(ObjectArrayObject):
         )
 
 
-class Map:
+class Map(IgniteDataType):
     """
     Dictionary type, payload-only.
 
@@ -220,8 +221,6 @@ class Map:
 
     @classmethod
     def parse(cls, client: 'Client'):
-        from .internal import AnyDataObject
-
         header_class = cls.build_header()
         buffer = client.recv(ctypes.sizeof(header_class))
         header = header_class.from_buffer_copy(buffer)
@@ -244,8 +243,6 @@ class Map:
 
     @classmethod
     def to_python(cls, ctype_object, *args, **kwargs):
-        from .internal import AnyDataObject
-
         map_type = getattr(ctype_object, 'type', cls.HASH_MAP)
         result = OrderedDict() if map_type == cls.LINKED_HASH_MAP else {}
 
@@ -263,8 +260,6 @@ class Map:
 
     @classmethod
     def from_python(cls, value, type_id=None):
-        from .internal import AnyDataObject
-
         header_class = cls.build_header()
         header = header_class()
         length = len(value)
@@ -279,14 +274,8 @@ class Map:
         buffer = bytes(header)
 
         for k, v in value.items():
-            if is_hinted(k):
-                buffer += k[1].from_python(k[0])
-            else:
-                buffer += AnyDataObject.from_python(k)
-            if is_hinted(v):
-                buffer += v[1].from_python(v[0])
-            else:
-                buffer += AnyDataObject.from_python(v)
+            buffer += infer_from_python(k)
+            buffer += infer_from_python(v)
         return buffer
 
 
@@ -329,7 +318,7 @@ class MapObject(Map):
         return super().from_python(value, type_id)
 
 
-class BinaryObject:
+class BinaryObject(IgniteDataType):
     type_code = TC_COMPLEX_OBJECT
 
     USER_TYPE = 0x0001
@@ -473,7 +462,7 @@ class BinaryObject:
             finally:
                 del frame
 
-        compact_footer = True
+        compact_footer = True  # this is actually used
         client = find_client()
         if client:
             # if no client can be found, the class of the `value` is discarded

@@ -13,26 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pyignite.datatypes import String
+from abc import ABC
 
 
-class APIResult:
+class IgniteDataType(ABC):
     """
-    Dataclass which represents the result of API request.
-
-    Fields are:
-
-    * status: request status code. 0 if successful,
-    * message: 'Success' if status == 0, verbatim error description
-      otherwise,
-    * value: return value or None.
+    This is a base class for all Ignite data types, a.k.a. parser/constructor
+    classes, both object and payload varieties.
     """
-
-    message = 'Success'
-    value = None
-
-    def __init__(self, response: 'Response'):
-        self.status = response.status_code
-        self.query_id = response.query_id
-        if hasattr(response, 'error_message'):
-            self.message = String.to_python(response.error_message)
+    pass

@@ -31,7 +31,7 @@ from .type_codes import *
 __all__ = ['AnyDataArray', 'AnyDataObject', 'Struct', 'StructArray', 'tc_map']
 
 
-def tc_map(key: bytes):
+def tc_map(key: bytes, _memo_map: dict={}):
     """
     Returns a default parser/generator class for the given type code.
 
@@ -40,66 +40,72 @@ def tc_map(key: bytes):
     reason.
 
     :param key: Ignite type code,
+    :param _memo_map: do not use this parameter, it is for memoization
+     of the “type code-type class” mapping,
     :return: parser/generator class for the type code.
     """
-    from pyignite.datatypes import (
-        Null, ByteObject, ShortObject, IntObject, LongObject, FloatObject,
-        DoubleObject, CharObject, BoolObject, UUIDObject, DateObject,
-        TimestampObject, TimeObject, EnumObject, BinaryEnumObject,
-        ByteArrayObject, ShortArrayObject, IntArrayObject, LongArrayObject,
-        FloatArrayObject, DoubleArrayObject, CharArrayObject, BoolArrayObject,
-        UUIDArrayObject, DateArrayObject, TimestampArrayObject,
-        TimeArrayObject, EnumArrayObject, String, StringArrayObject,
-        DecimalObject, DecimalArrayObject, ObjectArrayObject, CollectionObject,
-        MapObject, BinaryObject, WrappedDataObject,
-    )
+    if not _memo_map:
+        from pyignite.datatypes import (
+            Null, ByteObject, ShortObject, IntObject, LongObject, FloatObject,
+            DoubleObject, CharObject, BoolObject, UUIDObject, DateObject,
+            TimestampObject, TimeObject, EnumObject, BinaryEnumObject,
+            ByteArrayObject, ShortArrayObject, IntArrayObject, LongArrayObject,
+            FloatArrayObject, DoubleArrayObject, CharArrayObject,
+            BoolArrayObject,
+            UUIDArrayObject, DateArrayObject, TimestampArrayObject,
+            TimeArrayObject, EnumArrayObject, String, StringArrayObject,
+            DecimalObject, DecimalArrayObject, ObjectArrayObject,
+            CollectionObject,
+            MapObject, BinaryObject, WrappedDataObject,
+        )
 
-    return {
-        TC_NULL: Null,
+        _memo_map = {
+            TC_NULL: Null,
 
-        TC_BYTE: ByteObject,
-        TC_SHORT: ShortObject,
-        TC_INT: IntObject,
-        TC_LONG: LongObject,
-        TC_FLOAT: FloatObject,
-        TC_DOUBLE: DoubleObject,
-        TC_CHAR: CharObject,
-        TC_BOOL: BoolObject,
+            TC_BYTE: ByteObject,
+            TC_SHORT: ShortObject,
+            TC_INT: IntObject,
+            TC_LONG: LongObject,
+            TC_FLOAT: FloatObject,
+            TC_DOUBLE: DoubleObject,
+            TC_CHAR: CharObject,
+            TC_BOOL: BoolObject,
 
-        TC_UUID: UUIDObject,
-        TC_DATE: DateObject,
-        TC_TIMESTAMP: TimestampObject,
-        TC_TIME: TimeObject,
-        TC_ENUM: EnumObject,
-        TC_BINARY_ENUM: BinaryEnumObject,
+            TC_UUID: UUIDObject,
+            TC_DATE: DateObject,
+            TC_TIMESTAMP: TimestampObject,
+            TC_TIME: TimeObject,
+            TC_ENUM: EnumObject,
+            TC_BINARY_ENUM: BinaryEnumObject,
 
-        TC_BYTE_ARRAY: ByteArrayObject,
-        TC_SHORT_ARRAY: ShortArrayObject,
-        TC_INT_ARRAY: IntArrayObject,
-        TC_LONG_ARRAY: LongArrayObject,
-        TC_FLOAT_ARRAY: FloatArrayObject,
-        TC_DOUBLE_ARRAY: DoubleArrayObject,
-        TC_CHAR_ARRAY: CharArrayObject,
-        TC_BOOL_ARRAY: BoolArrayObject,
+            TC_BYTE_ARRAY: ByteArrayObject,
+            TC_SHORT_ARRAY: ShortArrayObject,
+            TC_INT_ARRAY: IntArrayObject,
+            TC_LONG_ARRAY: LongArrayObject,
+            TC_FLOAT_ARRAY: FloatArrayObject,
+            TC_DOUBLE_ARRAY: DoubleArrayObject,
+            TC_CHAR_ARRAY: CharArrayObject,
+            TC_BOOL_ARRAY: BoolArrayObject,
 
-        TC_UUID_ARRAY: UUIDArrayObject,
-        TC_DATE_ARRAY: DateArrayObject,
-        TC_TIMESTAMP_ARRAY: TimestampArrayObject,
-        TC_TIME_ARRAY: TimeArrayObject,
-        TC_ENUM_ARRAY: EnumArrayObject,
+            TC_UUID_ARRAY: UUIDArrayObject,
+            TC_DATE_ARRAY: DateArrayObject,
+            TC_TIMESTAMP_ARRAY: TimestampArrayObject,
+            TC_TIME_ARRAY: TimeArrayObject,
+            TC_ENUM_ARRAY: EnumArrayObject,
 
-        TC_STRING: String,
-        TC_STRING_ARRAY: StringArrayObject,
-        TC_DECIMAL: DecimalObject,
-        TC_DECIMAL_ARRAY: DecimalArrayObject,
+            TC_STRING: String,
+            TC_STRING_ARRAY: StringArrayObject,
+            TC_DECIMAL: DecimalObject,
+            TC_DECIMAL_ARRAY: DecimalArrayObject,
 
-        TC_OBJECT_ARRAY: ObjectArrayObject,
-        TC_COLLECTION: CollectionObject,
-        TC_MAP: MapObject,
+            TC_OBJECT_ARRAY: ObjectArrayObject,
+            TC_COLLECTION: CollectionObject,
+            TC_MAP: MapObject,
 
-        TC_COMPLEX_OBJECT: BinaryObject,
-        TC_ARRAY_WRAPPED_OBJECTS: WrappedDataObject,
-    }[key]
+            TC_COMPLEX_OBJECT: BinaryObject,
+            TC_ARRAY_WRAPPED_OBJECTS: WrappedDataObject,
+        }
+    return _memo_map[key]
 
 
 @attr.s
@@ -226,6 +232,8 @@ class AnyDataObject:
     Not an actual Ignite type, but contains a guesswork
     on serializing Python data or parsing an unknown Ignite data object.
     """
+    _python_map = None
+    _python_array_map = None
 
     @staticmethod
     def get_subtype(iterable, allow_none=False):
@@ -280,16 +288,18 @@ class AnyDataObject:
         return data_class.to_python(ctype_object)
 
     @classmethod
-    def map_python_type(cls, value):
+    def _init_python_map(cls):
+        """
+        Optimizes Python types→Ignite types map creation for speed.
+
+        Local imports seem inevitable here.
+        """
         from pyignite.datatypes import (
             LongObject, DoubleObject, String, BoolObject, Null, UUIDObject,
-            DateObject, TimeObject, DecimalObject, LongArrayObject,
-            DoubleArrayObject, StringArrayObject, BoolArrayObject,
-            UUIDArrayObject, DateArrayObject, TimeArrayObject,
-            DecimalArrayObject, MapObject, ObjectArrayObject, BinaryObject,
+            DateObject, TimeObject, DecimalObject,
         )
 
-        python_map = {
+        cls._python_map = {
             int: LongObject,
             float: DoubleObject,
             str: String,
@@ -303,7 +313,18 @@ class AnyDataObject:
             decimal.Decimal: DecimalObject,
         }
 
-        python_array_map = {
+    @classmethod
+    def _init_python_array_map(cls):
+        """
+        Optimizes  Python types→Ignite array types map creation for speed.
+        """
+        from pyignite.datatypes import (
+            LongArrayObject, DoubleArrayObject, StringArrayObject,
+            BoolArrayObject, UUIDArrayObject, DateArrayObject, TimeArrayObject,
+            DecimalArrayObject,
+        )
+
+        cls._python_array_map = {
             int: LongArrayObject,
             float: DoubleArrayObject,
             str: StringArrayObject,
@@ -316,11 +337,22 @@ class AnyDataObject:
             decimal.Decimal: DecimalArrayObject,
         }
 
+    @classmethod
+    def map_python_type(cls, value):
+        from pyignite.datatypes import (
+            MapObject, ObjectArrayObject, BinaryObject,
+        )
+
+        if cls._python_map is None:
+            cls._init_python_map()
+        if cls._python_array_map is None:
+            cls._init_python_array_map()
+
         value_type = type(value)
         if is_iterable(value) and value_type is not str:
             value_subtype = cls.get_subtype(value)
-            if value_subtype in python_array_map:
-                return python_array_map[value_subtype]
+            if value_subtype in cls._python_array_map:
+                return cls._python_array_map[value_subtype]
 
             # a little heuristics (order may be important)
             if all([
@@ -346,8 +378,8 @@ class AnyDataObject:
         if is_binary(value):
             return BinaryObject
 
-        if value_type in python_map:
-            return python_map[value_type]
+        if value_type in cls._python_map:
+            return cls._python_map[value_type]
         raise TypeError(
             'Type `{}` is invalid.'.format(value_type)
         )
@@ -355,6 +387,20 @@ class AnyDataObject:
     @classmethod
     def from_python(cls, value):
         return cls.map_python_type(value).from_python(value)
+
+
+def infer_from_python(value: Any):
+    """
+    Convert pythonic value to ctypes buffer, type hint-aware.
+
+    :param value: pythonic value or (value, type_hint) tuple,
+    :return: bytes.
+    """
+    if is_hinted(value):
+        value, data_type = value
+    else:
+        data_type = AnyDataObject
+    return data_type.from_python(value)
 
 
 @attr.s
@@ -422,8 +468,5 @@ class AnyDataArray(AnyDataObject):
         buffer = bytes(header)
 
         for x in value:
-            if is_hinted(x):
-                buffer += x[1].from_python(x[0])
-            else:
-                buffer += super().from_python(x)
+            buffer += infer_from_python(x)
         return buffer

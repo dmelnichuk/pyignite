@@ -16,6 +16,7 @@
 import ctypes
 
 from pyignite.constants import *
+from .base import IgniteDataType
 from .type_codes import *
 
 
@@ -25,7 +26,7 @@ __all__ = [
 ]
 
 
-class DataObject:
+class DataObject(IgniteDataType):
     """
     Base class for primitive data objects.
 
@@ -35,20 +36,23 @@ class DataObject:
 
     c_type = None
     type_code = None
+    _object_c_type = None
 
     @classmethod
     def build_c_type(cls):
-        return type(
-            cls.__name__,
-            (ctypes.LittleEndianStructure,),
-            {
-                '_pack_': 1,
-                '_fields_': [
-                    ('type_code', ctypes.c_byte),
-                    ('value', cls.c_type),
-                ],
-            },
-        )
+        if cls._object_c_type is None:
+            cls._object_c_type = type(
+                cls.__name__,
+                (ctypes.LittleEndianStructure,),
+                {
+                    '_pack_': 1,
+                    '_fields_': [
+                        ('type_code', ctypes.c_byte),
+                        ('value', cls.c_type),
+                    ],
+                },
+            )
+        return cls._object_c_type
 
     @classmethod
     def parse(cls, client: 'Client'):
@@ -94,7 +98,7 @@ class IntObject(DataObject):
 
 
 class LongObject(DataObject):
-    c_type = ctypes.c_long
+    c_type = ctypes.c_longlong
     type_code = TC_LONG
     pythonic = int
     default = 0
